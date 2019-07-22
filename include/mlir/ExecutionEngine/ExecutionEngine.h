@@ -32,6 +32,7 @@
 namespace llvm {
 template <typename T> class Expected;
 class Module;
+class TargetMachine;
 } // namespace llvm
 
 namespace mlir {
@@ -61,10 +62,13 @@ public:
   /// can be used, e.g., for reporting or optimization.
   /// If `sharedLibPaths` are provided, the underlying JIT-compilation will open
   /// and link the shared libraries for symbol resolution.
+  /// If `refTM` is provided, the underlying JIT-compilation will use that
+  /// target machine as reference to build its target machine.
   static llvm::Expected<std::unique_ptr<ExecutionEngine>>
   create(ModuleOp m,
          std::function<llvm::Error(llvm::Module *)> transformer = {},
-         ArrayRef<StringRef> sharedLibPaths = {});
+         ArrayRef<StringRef> sharedLibPaths = {},
+         llvm::TargetMachine *refTM = nullptr);
 
   /// Looks up a packed-argument function with the given name and returns a
   /// pointer to it.  Propagates errors in case of failure.
