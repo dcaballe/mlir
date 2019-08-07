@@ -144,10 +144,14 @@ public:
     loadLibraries(sharedLibPaths);
   }
 
-  // Create a JIT engine for the current host.
+  // Create a JIT engine for the reference target machine `refTM` or the current
+  // host if `refTM` is not provided.
   static Expected<std::unique_ptr<OrcJIT>>
-  createDefault(IRTransformer transformer, ArrayRef<StringRef> sharedLibPaths) {
-    auto machineBuilder = llvm::orc::JITTargetMachineBuilder::detectHost();
+  create(IRTransformer transformer, ArrayRef<StringRef> sharedLibPaths,
+         llvm::TargetMachine *refTM) {
+
+    auto machineBuilder =
+        refTM ? createRefMachineBuilder(refTM) : createDefaultMachineBuilder();
     if (!machineBuilder)
       return machineBuilder.takeError();
 
@@ -173,6 +177,50 @@ public:
   }
 
 private:
+  // Create a JIT engine for the reference target machine `refTM`.
+  static Expected<llvm::orc::JITTargetMachineBuilder>
+  createRefMachineBuilder(llvm::TargetMachine *refTM) {
+    assert(refTM && "Expected reference target machine!");
+
+    Expected<llvm::orc::JITTargetMachineBuilder> machineBuilder =
+        llvm::orc::JITTargetMachineBuilder(refTM->getTargetTriple());
+    if (!machineBuilder)
+      return machineBuilder.takeError();
+
+    machineBuilder->setCPU(refTM->getTargetCPU());
+    machineBuilder->setRelocationModel(refTM->getRelocationModel());
+    machineBuilder->setCodeModel(refTM->getCodeModel());
+    machineBuilder->setCodeGenOptLevel(refTM->getOptLevel());
+
+    std::vector<std::string> features;
+    llvm::SubtargetFeatures::Split(features, refTM->getTargetFeatureString());
+    machineBuilder->addFeatures(features);
+
+    return machineBuilder;
+  }
+
+  // Create a JIT engine for the current host.
+  static Expected<llvm::orc::JITTargetMachineBuilder>
+  createDefaultMachineBuilder() {
+    auto machineBuilder = llvm::orc::JITTargetMachineBuilder::detectHost();
+    if (!machineBuilder)
+      return machineBuilder.takeError();
+
+    // Retrieve host CPU sub-target features.
+    llvm::SubtargetFeatures subtargetFeatures;
+    llvm::StringMap<bool> featureMap;
+    llvm::sys::getHostCPUFeatures(featureMap);
+    for (auto &feature : featureMap)
+      subtargetFeatures.AddFeature(feature.first(), feature.second);
+
+    // Relocation model, code model and codegen opt level are kept to default
+    // values.
+    machineBuilder->setCPU(llvm::sys::getHostCPUName());
+    machineBuilder->addFeatures(subtargetFeatures.getFeatures());
+
+    return machineBuilder;
+  }
+
   // Wrap the `irTransformer` into a function that can be called by the
   // IRTranformLayer.  If `irTransformer` is not set up, return the module as
   // is without errors.
@@ -323,12 +371,11 @@ void packFunctionArguments(llvm::Module *module) {
 // Out of line for PIMPL unique_ptr.
 ExecutionEngine::~ExecutionEngine() = default;
 
-Expected<std::unique_ptr<ExecutionEngine>>
-ExecutionEngine::create(ModuleOp m,
-                        std::function<llvm::Error(llvm::Module *)> transformer,
-                        ArrayRef<StringRef> sharedLibPaths) {
+Expected<std::unique_ptr<ExecutionEngine>> ExecutionEngine::create(
+    ModuleOp m, std::function<llvm::Error(llvm::Module *)> transformer,
+    ArrayRef<StringRef> sharedLibPaths, llvm::TargetMachine *refTM) {
   auto engine = llvm::make_unique<ExecutionEngine>();
-  auto expectedJIT = impl::OrcJIT::createDefault(transformer, sharedLibPaths);
+  auto expectedJIT = impl::OrcJIT::create(transformer, sharedLibPaths, refTM);
   if (!expectedJIT)
     return expectedJIT.takeError();
 
