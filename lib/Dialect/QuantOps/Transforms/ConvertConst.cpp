@@ -99,8 +99,9 @@ QuantizedConstRewrite::matchAndRewrite(QuantizeCastOp qbarrier,
       rewriter.getContext());
   auto newConstOp =
       rewriter.create<ConstantOp>(fusedLoc, newConstValueType, newConstValue);
-  rewriter.replaceOpWithNewOp<StorageCastOp>({qbarrier.arg()}, qbarrier,
-                                             qbarrier.getType(), newConstOp);
+  rewriter.replaceOpWithNewOp<StorageCastOp>(
+      ArrayRef<Operation *>(qbarrier.arg()->getDefiningOp()), qbarrier,
+      qbarrier.getType(), newConstOp);
   return matchSuccess();
 }
 

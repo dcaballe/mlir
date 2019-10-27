@@ -341,7 +341,7 @@ public:
 
   /// PatternRewriter hook for replacing the results of an operation.
   void replaceOp(Operation *op, ArrayRef<Value *> newValues,
-                 ArrayRef<Value *> valuesToRemoveIfDead) override;
+                 ArrayRef<Operation *> valuesToRemoveIfDead) override;
   using PatternRewriter::replaceOp;
 
   /// PatternRewriter hook for erasing a dead operation. The uses of this

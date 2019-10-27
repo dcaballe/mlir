@@ -405,7 +405,7 @@ struct SimplifyAllocConst : public OpRewritePattern<AllocOp> {
     SmallVector<int64_t, 4> newShapeConstants;
     newShapeConstants.reserve(memrefType.getRank());
     SmallVector<Value *, 4> newOperands;
-    SmallVector<Value *, 4> droppedOperands;
+    SmallVector<Operation *, 4> droppedOperations;
 
     unsigned dynamicDimPos = 0;
     for (unsigned dim = 0, e = memrefType.getRank(); dim < e; ++dim) {
@@ -420,7 +420,7 @@ struct SimplifyAllocConst : public OpRewritePattern<AllocOp> {
         // Dynamic shape dimension will be folded.
         newShapeConstants.push_back(constantIndexOp.getValue());
         // Record to check for zero uses later below.
-        droppedOperands.push_back(constantIndexOp);
+        droppedOperations.push_back(constantIndexOp.getOperation());
       } else {
         // Dynamic shape dimension not folded; copy operand from old memref.
         newShapeConstants.push_back(-1);
@@ -443,7 +443,7 @@ struct SimplifyAllocConst : public OpRewritePattern<AllocOp> {
     auto resultCast = rewriter.create<MemRefCastOp>(alloc.getLoc(), newAlloc,
                                                     alloc.getType());
 
-    rewriter.replaceOp(alloc, {resultCast}, droppedOperands);
+    rewriter.replaceOp(alloc, {resultCast}, droppedOperations);
     return matchSuccess();
   }
 };

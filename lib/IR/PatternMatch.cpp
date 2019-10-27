@@ -79,6 +79,21 @@ PatternRewriter::~PatternRewriter() {
   // Out of line to provide a vtable anchor for the class.
 }
 
+/// This method removes dead Operations in 'opToRemoveIfDead'. An Operation is
+/// dead if all its Value results have no uses.
+void PatternRewriter::removeOpsIfDead(ArrayRef<Operation *> opToRemoveIfDead) {
+  for (auto *opToRemove : opToRemoveIfDead) {
+    // An Operation is dead if all its Value results have no uses.
+    auto opResults = opToRemove->getResults();
+    if (std::all_of(opResults.begin(), opResults.end(),
+                    [](Value *result) { return result->use_empty(); })) {
+
+      notifyOperationRemoved(opToRemove);
+      opToRemove->erase();
+    }
+  }
+}
+
 /// This method performs the final replacement for a pattern, where the
 /// results of the operation are updated to use the specified list of SSA
 /// values.  In addition to replacing and removing the specified operation,
@@ -86,7 +101,7 @@ PatternRewriter::~PatternRewriter() {
 /// (perhaps transitively) dead.  If any of those ops are dead, this will
 /// remove them as well.
 void PatternRewriter::replaceOp(Operation *op, ArrayRef<Value *> newValues,
-                                ArrayRef<Value *> valuesToRemoveIfDead) {
+                                ArrayRef<Operation *> valuesToRemoveIfDead) {
   // Notify the rewriter subclass that we're about to replace this root.
   notifyRootReplaced(op);
 
@@ -97,8 +112,7 @@ void PatternRewriter::replaceOp(Operation *op, ArrayRef<Value *> newValues,
   notifyOperationRemoved(op);
   op->erase();
 
-  // TODO: Process the valuesToRemoveIfDead list, removing things and calling
-  // the notifyOperationRemoved hook in the process.
+  removeOpsIfDead(valuesToRemoveIfDead);
 }
 
 /// This method erases an operation that is known to have no uses. The uses of
@@ -112,7 +126,8 @@ void PatternRewriter::eraseOp(Operation *op) {
 /// op and newOp are known to have the same number of results, replace the
 /// uses of op with uses of newOp
 void PatternRewriter::replaceOpWithResultsOfAnotherOp(
-    Operation *op, Operation *newOp, ArrayRef<Value *> valuesToRemoveIfDead) {
+    Operation *op, Operation *newOp,
+    ArrayRef<Operation *> valuesToRemoveIfDead) {
   assert(op->getNumResults() == newOp->getNumResults() &&
          "replacement op doesn't match results of original op");
   if (op->getNumResults() == 1)
@@ -162,12 +177,11 @@ void PatternRewriter::cloneRegionBefore(Region &region, Block *before) {
 /// should remove if they are dead at this point.
 ///
 void PatternRewriter::updatedRootInPlace(
-    Operation *op, ArrayRef<Value *> valuesToRemoveIfDead) {
+    Operation *op, ArrayRef<Operation *> valuesToRemoveIfDead) {
   // Notify the rewriter subclass that we're about to replace this root.
   notifyRootUpdated(op);
 
-  // TODO: Process the valuesToRemoveIfDead list, removing things and calling
-  // the notifyOperationRemoved hook in the process.
+  removeOpsIfDead(valuesToRemoveIfDead);
 }
 
 //===----------------------------------------------------------------------===//

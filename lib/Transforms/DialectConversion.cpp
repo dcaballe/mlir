@@ -464,7 +464,7 @@ struct ConversionPatternRewriterImpl {
 
   /// PatternRewriter hook for replacing the results of an operation.
   void replaceOp(Operation *op, ArrayRef<Value *> newValues,
-                 ArrayRef<Value *> valuesToRemoveIfDead);
+                 ArrayRef<Operation *> valuesToRemoveIfDead);
 
   /// Notifies that a block was split.
   void notifySplitBlock(Block *block, Block *continuation);
@@ -644,7 +644,7 @@ void ConversionPatternRewriterImpl::applySignatureConversion(
 
 void ConversionPatternRewriterImpl::replaceOp(
     Operation *op, ArrayRef<Value *> newValues,
-    ArrayRef<Value *> valuesToRemoveIfDead) {
+    ArrayRef<Operation *> valuesToRemoveIfDead) {
   assert(newValues.size() == op->getNumResults());
 
   // Create mappings for each of the new result values.
@@ -720,7 +720,7 @@ ConversionPatternRewriter::~ConversionPatternRewriter() {}
 /// PatternRewriter hook for replacing the results of an operation.
 void ConversionPatternRewriter::replaceOp(
     Operation *op, ArrayRef<Value *> newValues,
-    ArrayRef<Value *> valuesToRemoveIfDead) {
+    ArrayRef<Operation *> valuesToRemoveIfDead) {
   LLVM_DEBUG(llvm::dbgs() << "** Replacing operation : " << op->getName()
                           << "\n");
   impl->replaceOp(op, newValues, valuesToRemoveIfDead);

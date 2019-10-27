@@ -325,6 +325,10 @@ public:
                          Region::iterator before);
   void cloneRegionBefore(Region &region, Block *before);
 
+  /// This method removes dead Operations in 'opToRemoveIfDead'. An Operation is
+  /// dead if all its Value results have no uses.
+  void removeOpsIfDead(ArrayRef<Operation *> opToRemoveIfDead);
+
   /// This method performs the final replacement for a pattern, where the
   /// results of the operation are updated to use the specified list of SSA
   /// values.  In addition to replacing and removing the specified operation,
@@ -332,7 +336,7 @@ public:
   /// (perhaps transitively) dead.  If any of those values are dead, this will
   /// remove them as well.
   virtual void replaceOp(Operation *op, ArrayRef<Value *> newValues,
-                         ArrayRef<Value *> valuesToRemoveIfDead);
+                         ArrayRef<Operation *> valuesToRemoveIfDead);
   void replaceOp(Operation *op, ArrayRef<Value *> newValues) {
     replaceOp(op, newValues, llvm::None);
   }
@@ -349,8 +353,8 @@ public:
   /// The result values of the two ops must be the same types.  This allows
   /// specifying a list of ops that may be removed if dead.
   template <typename OpTy, typename... Args>
-  void replaceOpWithNewOp(ArrayRef<Value *> valuesToRemoveIfDead, Operation *op,
-                          Args &&... args) {
+  void replaceOpWithNewOp(ArrayRef<Operation *> valuesToRemoveIfDead,
+                          Operation *op, Args &&... args) {
     auto newOp = create<OpTy>(op->getLoc(), std::forward<Args>(args)...);
     replaceOpWithResultsOfAnotherOp(op, newOp.getOperation(),
                                     valuesToRemoveIfDead);
@@ -374,7 +378,7 @@ public:
   /// rewriter should remove if they are dead at this point.
   ///
   void updatedRootInPlace(Operation *op,
-                          ArrayRef<Value *> valuesToRemoveIfDead = {});
+                          ArrayRef<Operation *> valuesToRemoveIfDead = {});
 
 protected:
   explicit PatternRewriter(MLIRContext *ctx) : OpBuilder(ctx) {}
@@ -400,8 +404,9 @@ protected:
 private:
   /// op and newOp are known to have the same number of results, replace the
   /// uses of op with uses of newOp
-  void replaceOpWithResultsOfAnotherOp(Operation *op, Operation *newOp,
-                                       ArrayRef<Value *> valuesToRemoveIfDead);
+  void
+  replaceOpWithResultsOfAnotherOp(Operation *op, Operation *newOp,
+                                  ArrayRef<Operation *> valuesToRemoveIfDead);
 };
 
 //===----------------------------------------------------------------------===//
