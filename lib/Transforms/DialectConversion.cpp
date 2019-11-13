@@ -335,8 +335,10 @@ Operation *ArgConverter::convertArgument(BlockArgument *origArg,
 
     // Insert a mapping between this argument and the one that is replacing
     // it.
-    if (!newValues.empty())
+    if (!newValues.empty()) {
       mapping.map(cast->getResult(0), newValues[0]);
+      mapping.map(origArg, cast->getResult(0));
+    }
     return cast;
   }
 
