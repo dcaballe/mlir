@@ -1,4 +1,5 @@
 add_llvm_library(MLIRStandardToLLVM
+  BarePtrMemRefLowering.cpp
   ConvertStandardToLLVM.cpp
 
   ADDITIONAL_HEADER_DIRS

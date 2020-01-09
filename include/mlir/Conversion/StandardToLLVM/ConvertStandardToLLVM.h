@@ -24,6 +24,7 @@
 #ifndef MLIR_CONVERSION_STANDARDTOLLVM_CONVERTSTANDARDTOLLVM_H
 #define MLIR_CONVERSION_STANDARDTOLLVM_CONVERTSTANDARDTOLLVM_H
 
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Transforms/DialectConversion.h"
 
 namespace llvm {
@@ -247,6 +248,53 @@ protected:
   // Back-reference to the lowering class, used to call type and function
   // conversions accounting for potential extensions.
   LLVMTypeConverter &lowering;
+};
+
+// Base class for Standard to LLVM IR op conversions.  Matches the Op type
+// provided as template argument.  Carries a reference to the LLVM dialect in
+// case it is necessary for rewriters.
+template <typename SourceOp>
+class LLVMLegalizationPattern : public LLVMOpLowering {
+public:
+  // Construct a conversion pattern.
+  explicit LLVMLegalizationPattern(LLVM::LLVMDialect &dialect_,
+                                   LLVMTypeConverter &lowering_)
+      : LLVMOpLowering(SourceOp::getOperationName(), dialect_.getContext(),
+                       lowering_),
+        dialect(dialect_) {}
+
+  // Get the LLVM IR dialect.
+  LLVM::LLVMDialect &getDialect() const { return dialect; }
+  // Get the LLVM context.
+  llvm::LLVMContext &getContext() const { return dialect.getLLVMContext(); }
+  // Get the LLVM module in which the types are constructed.
+  llvm::Module &getModule() const { return dialect.getLLVMModule(); }
+
+  // Get the MLIR type wrapping the LLVM integer type whose bit width is defined
+  // by the pointer size used in the LLVM module.
+  LLVM::LLVMType getIndexType() const {
+    return LLVM::LLVMType::getIntNTy(
+        &dialect, getModule().getDataLayout().getPointerSizeInBits());
+  }
+
+  LLVM::LLVMType getVoidType() const {
+    return LLVM::LLVMType::getVoidTy(&dialect);
+  }
+
+  // Get the MLIR type wrapping the LLVM i8* type.
+  LLVM::LLVMType getVoidPtrType() const {
+    return LLVM::LLVMType::getInt8PtrTy(&dialect);
+  }
+
+  // Create an LLVM IR pseudo-operation defining the given index constant.
+  ValuePtr createIndexConstant(ConversionPatternRewriter &builder, Location loc,
+                               uint64_t value) const {
+    llvm_unreachable("TODO");
+    // return createIndexAttrConstant(builder, loc, getIndexType(), value);
+  }
+
+protected:
+  LLVM::LLVMDialect &dialect;
 };
 
 } // namespace mlir

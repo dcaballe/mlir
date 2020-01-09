@@ -67,6 +67,19 @@ void populateStdToLLVMNonMemoryConversionPatterns(
 void populateStdToLLVMConversionPatterns(LLVMTypeConverter &converter,
                                          OwningRewritePatternList &patterns);
 
+/// Collect a set of patterns to convert memory-related operations from the
+/// Standard dialect to the LLVM dialect, excluding the non memory-related
+/// operations. MemRef type is lowered to a bare pointer to the element type.
+/// This lowering only supports static shapes.
+void populateStdToLLVMMemoryConvPattersBarePtrMemRef(
+    LLVMTypeConverter &converter, OwningRewritePatternList &patterns);
+
+/// Collect a set of patterns to convert from the Standard dialect to LLVM
+/// dialect. MemRef type is lowered to a bare pointer to the element type. This
+/// lowering only supports static shapes.
+void populateStdToLLVMConvPatternsBarePtrMemRef(
+    LLVMTypeConverter &converter, OwningRewritePatternList &patterns);
+
 /// Creates a pass to convert the Standard dialect into the LLVMIR dialect.
 /// By default stdlib malloc/free are used for allocating MemRef payloads.
 /// Specifying `useAlloca-true` emits stack allocations instead. In the future
