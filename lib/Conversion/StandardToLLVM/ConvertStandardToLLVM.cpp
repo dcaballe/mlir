@@ -24,8 +24,8 @@
 #include "mlir/ADT/TypeSwitch.h"
 #include "mlir/Conversion/LoopToStandard/ConvertLoopToStandard.h"
 #include "mlir/Conversion/StandardToLLVM/BarePtrMemRefLowering.h"
+#include "mlir/Conversion/StandardToLLVM/CommonStandardToLLVMConversion.h"
 #include "mlir/Conversion/StandardToLLVM/ConvertStandardToLLVMPass.h"
-//#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/StandardOps/Ops.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/MLIRContext.h"
@@ -844,7 +844,7 @@ struct UnsignedShiftRightOpLowering
 
 // Check if the MemRefType `type` is supported by the lowering. We currently
 // only support memrefs with identity maps.
-static bool isSupportedMemRefType(MemRefType type) {
+bool isSupportedMemRefType(MemRefType type) {
   return type.getAffineMaps().empty() ||
          llvm::all_of(type.getAffineMaps(),
                       [](AffineMap map) { return map.isIdentity(); });
@@ -1334,127 +1334,6 @@ struct DimOpLowering : public LLVMLegalizationPattern<DimOp> {
       // Use constant for static size.
       rewriter.replaceOp(
           op, createIndexConstant(rewriter, op->getLoc(), shape[index]));
-    return matchSuccess();
-  }
-};
-
-// Common base for load and store operations on MemRefs.  Restricts the match
-// to supported MemRef types.  Provides functionality to emit code accessing a
-// specific element of the underlying data buffer.
-template <typename Derived>
-struct LoadStoreOpLowering : public LLVMLegalizationPattern<Derived> {
-  using LLVMLegalizationPattern<Derived>::LLVMLegalizationPattern;
-  using Base = LoadStoreOpLowering<Derived>;
-
-  PatternMatchResult match(Operation *op) const override {
-    MemRefType type = cast<Derived>(op).getMemRefType();
-    return isSupportedMemRefType(type) ? this->matchSuccess()
-                                       : this->matchFailure();
-  }
-
-  // Given subscript indices and array sizes in row-major order,
-  //   i_n, i_{n-1}, ..., i_1
-  //   s_n, s_{n-1}, ..., s_1
-  // obtain a value that corresponds to the linearized subscript
-  //   \sum_k i_k * \prod_{j=1}^{k-1} s_j
-  // by accumulating the running linearized value.
-  // Note that `indices` and `allocSizes` are passed in the same order as they
-  // appear in load/store operations and memref type declarations.
-  ValuePtr linearizeSubscripts(ConversionPatternRewriter &builder, Location loc,
-                               ArrayRef<ValuePtr> indices,
-                               ArrayRef<ValuePtr> allocSizes) const {
-    assert(indices.size() == allocSizes.size() &&
-           "mismatching number of indices and allocation sizes");
-    assert(!indices.empty() && "cannot linearize a 0-dimensional access");
-
-    ValuePtr linearized = indices.front();
-    for (int i = 1, nSizes = allocSizes.size(); i < nSizes; ++i) {
-      linearized = builder.create<LLVM::MulOp>(
-          loc, this->getIndexType(),
-          ArrayRef<ValuePtr>{linearized, allocSizes[i]});
-      linearized = builder.create<LLVM::AddOp>(
-          loc, this->getIndexType(),
-          ArrayRef<ValuePtr>{linearized, indices[i]});
-    }
-    return linearized;
-  }
-
-  // This is a strided getElementPtr variant that linearizes subscripts as:
-  //   `base_offset + index_0 * stride_0 + ... + index_n * stride_n`.
-  ValuePtr getStridedElementPtr(Location loc, Type elementTypePtr,
-                                ValuePtr descriptor, ArrayRef<ValuePtr> indices,
-                                ArrayRef<int64_t> strides, int64_t offset,
-                                ConversionPatternRewriter &rewriter) const {
-    MemRefDescriptor memRefDescriptor(descriptor);
-
-    ValuePtr base = memRefDescriptor.alignedPtr(rewriter, loc);
-    ValuePtr offsetValue =
-        offset == MemRefType::getDynamicStrideOrOffset()
-            ? memRefDescriptor.offset(rewriter, loc)
-            : this->createIndexConstant(rewriter, loc, offset);
-
-    for (int i = 0, e = indices.size(); i < e; ++i) {
-      ValuePtr stride =
-          strides[i] == MemRefType::getDynamicStrideOrOffset()
-              ? memRefDescriptor.stride(rewriter, loc, i)
-              : this->createIndexConstant(rewriter, loc, strides[i]);
-      ValuePtr additionalOffset =
-          rewriter.create<LLVM::MulOp>(loc, indices[i], stride);
-      offsetValue =
-          rewriter.create<LLVM::AddOp>(loc, offsetValue, additionalOffset);
-    }
-    return rewriter.create<LLVM::GEPOp>(loc, elementTypePtr, base, offsetValue);
-  }
-
-  ValuePtr getDataPtr(Location loc, MemRefType type, ValuePtr memRefDesc,
-                      ArrayRef<ValuePtr> indices,
-                      ConversionPatternRewriter &rewriter,
-                      llvm::Module &module) const {
-    LLVM::LLVMType ptrType = MemRefDescriptor(memRefDesc).getElementType();
-    int64_t offset;
-    SmallVector<int64_t, 4> strides;
-    auto successStrides = getStridesAndOffset(type, strides, offset);
-    assert(succeeded(successStrides) && "unexpected non-strided memref");
-    (void)successStrides;
-    return getStridedElementPtr(loc, ptrType, memRefDesc, indices, strides,
-                                offset, rewriter);
-  }
-};
-
-// Load operation is lowered to obtaining a pointer to the indexed element
-// and loading it.
-struct LoadOpLowering : public LoadStoreOpLowering<LoadOp> {
-  using Base::Base;
-
-  PatternMatchResult
-  matchAndRewrite(Operation *op, ArrayRef<ValuePtr> operands,
-                  ConversionPatternRewriter &rewriter) const override {
-    auto loadOp = cast<LoadOp>(op);
-    OperandAdaptor<LoadOp> transformed(operands);
-    auto type = loadOp.getMemRefType();
-
-    ValuePtr dataPtr = getDataPtr(op->getLoc(), type, transformed.memref(),
-                                  transformed.indices(), rewriter, getModule());
-    rewriter.replaceOpWithNewOp<LLVM::LoadOp>(op, dataPtr);
-    return matchSuccess();
-  }
-};
-
-// Store operation is lowered to obtaining a pointer to the indexed element,
-// and storing the given value to it.
-struct StoreOpLowering : public LoadStoreOpLowering<StoreOp> {
-  using Base::Base;
-
-  PatternMatchResult
-  matchAndRewrite(Operation *op, ArrayRef<ValuePtr> operands,
-                  ConversionPatternRewriter &rewriter) const override {
-    auto type = cast<StoreOp>(op).getMemRefType();
-    OperandAdaptor<StoreOp> transformed(operands);
-
-    ValuePtr dataPtr = getDataPtr(op->getLoc(), type, transformed.memref(),
-                                  transformed.indices(), rewriter, getModule());
-    rewriter.replaceOpWithNewOp<LLVM::StoreOp>(op, transformed.value(),
-                                               dataPtr);
     return matchSuccess();
   }
 };

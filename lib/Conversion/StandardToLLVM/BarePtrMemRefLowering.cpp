@@ -19,26 +19,26 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "mlir/Conversion/StandardToLLVM/ConvertStandardToLLVM.h"
-
+#include "mlir/Conversion/StandardToLLVM/BarePtrMemRefLowering.h"
+#include "mlir/Conversion/StandardToLLVM/CommonStandardToLLVMConversion.h"
 #include "mlir/Conversion/StandardToLLVM/ConvertStandardToLLVMPass.h"
-#include "mlir/ADT/TypeSwitch.h"
-#include "mlir/Conversion/LoopToStandard/ConvertLoopToStandard.h"
-#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+//#include "mlir/ADT/TypeSwitch.h"
+//#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/StandardOps/Ops.h"
-#include "mlir/IR/Builders.h"
-#include "mlir/IR/MLIRContext.h"
+//#include "mlir/IR/Builders.h"
+//#include "mlir/IR/MLIRContext.h"
+#include "mlir/IR/AffineMap.h"
 #include "mlir/IR/Module.h"
-#include "mlir/IR/PatternMatch.h"
-#include "mlir/Pass/Pass.h"
-#include "mlir/Support/Functional.h"
-#include "mlir/Transforms/DialectConversion.h"
-#include "mlir/Transforms/Passes.h"
-#include "mlir/Transforms/Utils.h"
+//#include "mlir/IR/PatternMatch.h"
+//#include "mlir/Pass/Pass.h"
+//#include "mlir/Support/Functional.h"
+//#include "mlir/Transforms/DialectConversion.h"
+//#include "mlir/Transforms/Passes.h"
+//#include "mlir/Transforms/Utils.h"
 
-#include "llvm/IR/DerivedTypes.h"
-#include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/Type.h"
+//#include "llvm/IR/DerivedTypes.h"
+//#include "llvm/IR/IRBuilder.h"
+//#include "llvm/IR/Type.h"
 #include "llvm/Support/CommandLine.h"
 
 using namespace mlir;
@@ -56,186 +56,96 @@ static bool isSupportedMemRefType(MemRefType type) {
 
 namespace {
 
-// Common base for load and store operations on MemRefs.  Restricts the match
-// to supported MemRef types.  Provides functionality to emit code accessing a
-// specific element of the underlying data buffer.
-template <typename Derived>
-struct LoadStoreOpLowering : public LLVMLegalizationPattern<Derived> {
-  using LLVMLegalizationPattern<Derived>::LLVMLegalizationPattern;
-  using Base = LoadStoreOpLowering<Derived>;
+// Create an LLVM IR pseudo-operation defining the given index constant.
+static ValuePtr createIndexConstant(ConversionPatternRewriter &builder,
+                                    Location loc, uint64_t value) {
+  return builder.create<LLVM::ConstantOp>(
+      loc, builder.getIndexType(),
+      builder.getIntegerAttr(builder.getIndexType(), value));
+}
 
-  PatternMatchResult match(Operation *op) const override {
-    MemRefType type = cast<Derived>(op).getMemRefType();
-    return isSupportedMemRefType(type) ? this->matchSuccess()
-                                       : this->matchFailure();
+// This is a strided getElementPtr variant that linearizes subscripts as:
+//   `base_offset + index_0 * stride_0 + ... + index_n * stride_n`.
+static ValuePtr getBarePtrMemRefStridedElementPtr(
+    Location loc, Type elementTypePtr, ValuePtr descriptor,
+    ArrayRef<ValuePtr> indices, ArrayRef<int64_t> strides, int64_t offset,
+    ConversionPatternRewriter &rewriter) {
+  assert(offset != MemRefType::getDynamicStrideOrOffset() &&
+         "Dynamic opset is not supported");
+
+  ValuePtr offsetValue = createIndexConstant(rewriter, loc, offset);
+  for (int i = 0, e = indices.size(); i < e; ++i) {
+    assert(strides[i] != MemRefType::getDynamicStrideOrOffset() &&
+           "Dynamic strides are not supported");
+
+    ValuePtr stride = createIndexConstant(rewriter, loc, strides[i]);
+    ValuePtr additionalOffset =
+        rewriter.create<LLVM::MulOp>(loc, indices[i], stride);
+    offsetValue =
+        rewriter.create<LLVM::AddOp>(loc, offsetValue, additionalOffset);
   }
+  return rewriter.create<LLVM::GEPOp>(loc, elementTypePtr, descriptor,
+                                      offsetValue);
+}
 
-  // TODO: Refactor?
-  // Given subscript indices and array sizes in row-major order,
-  //   i_n, i_{n-1}, ..., i_1
-  //   s_n, s_{n-1}, ..., s_1
-  // obtain a value that corresponds to the linearized subscript
-  //   \sum_k i_k * \prod_{j=1}^{k-1} s_j
-  // by accumulating the running linearized value.
-  // Note that `indices` and `allocSizes` are passed in the same order as they
-  // appear in load/store operations and memref type declarations.
-  ValuePtr linearizeSubscripts(ConversionPatternRewriter &builder, Location loc,
-                               ArrayRef<ValuePtr> indices,
-                               ArrayRef<ValuePtr> allocSizes) const {
-    assert(indices.size() == allocSizes.size() &&
-           "mismatching number of indices and allocation sizes");
-    assert(!indices.empty() && "cannot linearize a 0-dimensional access");
+static ValuePtr getBarePtrMemRefDataPtr(Location loc, MemRefType type,
+                                        ValuePtr memRefDesc,
+                                        ArrayRef<ValuePtr> indices,
+                                        ConversionPatternRewriter &rewriter,
+                                        llvm::Module &module) {
+  auto ptrType = memRefDesc->getType().cast<LLVM::LLVMType>();
+  int64_t offset;
+  SmallVector<int64_t, 4> strides;
+  auto successStrides = getStridesAndOffset(type, strides, offset);
+  assert(succeeded(successStrides) && "unexpected non-strided memref");
+  (void)successStrides;
+  return getBarePtrMemRefStridedElementPtr(loc, ptrType, memRefDesc, indices,
+                                           strides, offset, rewriter);
+}
 
-    ValuePtr linearized = indices.front();
-    for (int i = 1, nSizes = allocSizes.size(); i < nSizes; ++i) {
-      linearized = builder.create<LLVM::MulOp>(
-          loc, this->getIndexType(),
-          ArrayRef<ValuePtr>{linearized, allocSizes[i]});
-      linearized = builder.create<LLVM::AddOp>(
-          loc, this->getIndexType(),
-          ArrayRef<ValuePtr>{linearized, indices[i]});
-    }
-    return linearized;
-  }
+// Load operation is lowered to obtaining a pointer to the indexed element
+// and loading it.
+struct LoadOpBarePtrMemRefLowering : public LoadOpLowering {
+  //using Base::Base;
 
-  // This is a strided getElementPtr variant that linearizes subscripts as:
-  //   `base_offset + index_0 * stride_0 + ... + index_n * stride_n`.
-  ValuePtr getStridedElementPtr(Location loc, Type elementTypePtr,
-                                ValuePtr descriptor, ArrayRef<ValuePtr> indices,
-                                ArrayRef<int64_t> strides, int64_t offset,
-                                ConversionPatternRewriter &rewriter) const {
-    assert(offset != MemRefType::getDynamicStrideOrOffset() &&
-           "Dynamic opset is not supported");
-
-    ValuePtr offsetValue = this->createIndexConstant(rewriter, loc, offset);
-    for (int i = 0, e = indices.size(); i < e; ++i) {
-      assert(strides[i] != MemRefType::getDynamicStrideOrOffset() &&
-             "Dynamic strides are not supported");
-
-      ValuePtr stride = this->createIndexConstant(rewriter, loc, strides[i]);
-      ValuePtr additionalOffset =
-          rewriter.create<LLVM::MulOp>(loc, indices[i], stride);
-      offsetValue =
-          rewriter.create<LLVM::AddOp>(loc, offsetValue, additionalOffset);
-    }
-    return rewriter.create<LLVM::GEPOp>(loc, elementTypePtr, descriptor, offsetValue);
+  ValuePtr
+  getStridedElementPtr(Location loc, Type elementTypePtr, ValuePtr descriptor,
+                       ArrayRef<ValuePtr> indices, ArrayRef<int64_t> strides,
+                       int64_t offset,
+                       ConversionPatternRewriter &rewriter) const override {
+    return getBarePtrMemRefStridedElementPtr(
+        loc, elementTypePtr, descriptor, indices, strides, offset, rewriter);
   }
 
   ValuePtr getDataPtr(Location loc, MemRefType type, ValuePtr memRefDesc,
                       ArrayRef<ValuePtr> indices,
                       ConversionPatternRewriter &rewriter,
                       llvm::Module &module) const {
-    auto ptrType = memRefDesc->getType().cast<LLVM::LLVMType>();
-    int64_t offset;
-    SmallVector<int64_t, 4> strides;
-    auto successStrides = getStridesAndOffset(type, strides, offset);
-    assert(succeeded(successStrides) && "unexpected non-strided memref");
-    (void)successStrides;
-    return getStridedElementPtr(loc, ptrType, memRefDesc, indices, strides,
-                                offset, rewriter);
+    return getBarePtrMemRefDataPtr(loc, type, memRefDesc, indices, rewriter,
+                                   module);
   }
 };
 
-// TODO: Refactor?
-// Load operation is lowered to obtaining a pointer to the indexed element
-// and loading it.
-struct LoadOpLowering : public LoadStoreOpLowering<LoadOp> {
-  using Base::Base;
-
-  PatternMatchResult
-  matchAndRewrite(Operation *op, ArrayRef<ValuePtr> operands,
-                  ConversionPatternRewriter &rewriter) const override {
-    auto loadOp = cast<LoadOp>(op);
-    OperandAdaptor<LoadOp> transformed(operands);
-    auto type = loadOp.getMemRefType();
-
-    ValuePtr dataPtr = getDataPtr(op->getLoc(), type, transformed.memref(),
-                                  transformed.indices(), rewriter, getModule());
-    rewriter.replaceOpWithNewOp<LLVM::LoadOp>(op, dataPtr);
-    return matchSuccess();
-  }
-};
-
-// TODO: Refactor?
 // Store operation is lowered to obtaining a pointer to the indexed element,
 // and storing the given value to it.
-struct StoreOpLowering : public LoadStoreOpLowering<StoreOp> {
+struct StoreOpBarePtrMemRefLowering : public LoadStoreOpLowering<StoreOp> {
   using Base::Base;
 
-  PatternMatchResult
-  matchAndRewrite(Operation *op, ArrayRef<ValuePtr> operands,
-                  ConversionPatternRewriter &rewriter) const override {
-    auto type = cast<StoreOp>(op).getMemRefType();
-    OperandAdaptor<StoreOp> transformed(operands);
-
-    ValuePtr dataPtr = getDataPtr(op->getLoc(), type, transformed.memref(),
-                                  transformed.indices(), rewriter, getModule());
-    rewriter.replaceOpWithNewOp<LLVM::StoreOp>(op, transformed.value(),
-                                               dataPtr);
-    return matchSuccess();
+  ValuePtr
+  getStridedElementPtr(Location loc, Type elementTypePtr, ValuePtr descriptor,
+                       ArrayRef<ValuePtr> indices, ArrayRef<int64_t> strides,
+                       int64_t offset,
+                       ConversionPatternRewriter &rewriter) const override {
+    return getBarePtrMemRefStridedElementPtr(
+        loc, elementTypePtr, descriptor, indices, strides, offset, rewriter);
   }
-};
 
-struct FuncOpConversion : public LLVMLegalizationPattern<FuncOp> {
-  using LLVMLegalizationPattern<FuncOp>::LLVMLegalizationPattern;
-
-  PatternMatchResult
-  matchAndRewrite(Operation *op, ArrayRef<ValuePtr> operands,
-                  ConversionPatternRewriter &rewriter) const override {
-    auto funcOp = cast<FuncOp>(op);
-    FunctionType type = funcOp.getType();
-
-    // Store the positions of memref-typed arguments so that we can emit loads
-    // from them to follow the calling convention.
-    SmallVector<unsigned, 4> promotedArgIndices;
-    promotedArgIndices.reserve(type.getNumInputs());
-    for (auto en : llvm::enumerate(type.getInputs())) {
-      if (en.value().isa<MemRefType>() || en.value().isa<UnrankedMemRefType>())
-        promotedArgIndices.push_back(en.index());
-    }
-
-    // Convert the original function arguments. Struct arguments are promoted to
-    // pointer to struct arguments to allow calling external functions with
-    // various ABIs (e.g. compiled from C/C++ on platform X).
-    auto varargsAttr = funcOp.getAttrOfType<BoolAttr>("std.varargs");
-    TypeConverter::SignatureConversion result(funcOp.getNumArguments());
-    auto llvmType = lowering.convertFunctionSignature(
-        funcOp.getType(), varargsAttr && varargsAttr.getValue(), result);
-
-    // Only retain those attributes that are not constructed by build.
-    SmallVector<NamedAttribute, 4> attributes;
-    for (const auto &attr : funcOp.getAttrs()) {
-      if (attr.first.is(SymbolTable::getSymbolAttrName()) ||
-          attr.first.is(impl::getTypeAttrName()) ||
-          attr.first.is("std.varargs"))
-        continue;
-      attributes.push_back(attr);
-    }
-
-    // Create an LLVM function, use external linkage by default until MLIR
-    // functions have linkage.
-    auto newFuncOp = rewriter.create<LLVM::LLVMFuncOp>(
-        op->getLoc(), funcOp.getName(), llvmType, LLVM::Linkage::External,
-        attributes);
-    rewriter.inlineRegionBefore(funcOp.getBody(), newFuncOp.getBody(),
-                                newFuncOp.end());
-
-    // Tell the rewriter to convert the region signature.
-    rewriter.applySignatureConversion(&newFuncOp.getBody(), result);
-
-    // Insert loads from memref descriptor pointers in function bodies.
-    if (!newFuncOp.getBody().empty()) {
-      Block *firstBlock = &newFuncOp.getBody().front();
-      rewriter.setInsertionPoint(firstBlock, firstBlock->begin());
-      for (unsigned idx : promotedArgIndices) {
-        BlockArgumentPtr arg = firstBlock->getArgument(idx);
-        ValuePtr loaded = rewriter.create<LLVM::LoadOp>(funcOp.getLoc(), arg);
-        rewriter.replaceUsesOfBlockArgument(arg, loaded);
-      }
-    }
-
-    rewriter.eraseOp(op);
-    return matchSuccess();
+  ValuePtr getDataPtr(Location loc, MemRefType type, ValuePtr memRefDesc,
+                      ArrayRef<ValuePtr> indices,
+                      ConversionPatternRewriter &rewriter,
+                      llvm::Module &module) const {
+    return getBarePtrMemRefDataPtr(loc, type, memRefDesc, indices, rewriter,
+                                   module);
   }
 };
 
@@ -261,7 +171,7 @@ struct AllocOpLowering : public LLVMLegalizationPattern<AllocOp> {
 
   PatternMatchResult match(Operation *op) const override {
     MemRefType type = cast<AllocOp>(op).getType();
-    if (isSupportedMemRefType(type))
+    if (this->isSupportedMemRefType(type))
       return matchSuccess();
 
     return matchFailure();
@@ -401,7 +311,7 @@ struct DeallocOpLowering : public LLVMLegalizationPattern<DeallocOp> {
 
 } // namespace
 
-void mlir::populateStdToLLVMMemoryConvPattersBarePtrMemRef(
+void mlir::populateStdToLLVMMemoryConvPatternsBarePtrMemRef(
     LLVMTypeConverter &converter, OwningRewritePatternList &patterns) {
   // clang-format off
   patterns.insert<
@@ -422,5 +332,5 @@ void mlir::populateStdToLLVMMemoryConvPattersBarePtrMemRef(
 void mlir::populateStdToLLVMConvPatternsBarePtrMemRef(
     LLVMTypeConverter &converter, OwningRewritePatternList &patterns) {
   populateStdToLLVMNonMemoryConversionPatterns(converter, patterns);
-  populateStdToLLVMMemoryConvPattersBarePtrMemRef(converter, patterns);
+  populateStdToLLVMMemoryConvPatternsBarePtrMemRef(converter, patterns);
 }

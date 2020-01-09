@@ -71,7 +71,7 @@ void populateStdToLLVMConversionPatterns(LLVMTypeConverter &converter,
 /// Standard dialect to the LLVM dialect, excluding the non memory-related
 /// operations. MemRef type is lowered to a bare pointer to the element type.
 /// This lowering only supports static shapes.
-void populateStdToLLVMMemoryConvPattersBarePtrMemRef(
+void populateStdToLLVMMemoryConvPatternsBarePtrMemRef(
     LLVMTypeConverter &converter, OwningRewritePatternList &patterns);
 
 /// Collect a set of patterns to convert from the Standard dialect to LLVM
